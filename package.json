@@ -1,0 +1,17 @@
+{
+  "name": "neodove-callyzer-middleware",
+  "version": "1.0.0",
+  "description": "NeoDove to Callyzer integration middleware",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "axios": "^1.20.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "helmet": "^8.3.0"
+  }
+}
