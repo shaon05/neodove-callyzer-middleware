@@ -610,7 +610,38 @@ app.post(
   }
 );
 
+app.post("/neodove/global-test", (req, res) => {
+  try {
+    const incomingSecret = req.get("x-webhook-secret");
 
+    if (
+      !process.env.NEODOVE_WEBHOOK_SECRET ||
+      incomingSecret !== process.env.NEODOVE_WEBHOOK_SECRET
+    ) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized webhook request",
+      });
+    }
+
+    console.log("======================================");
+    console.log("NEODOVE GLOBAL WEBHOOK PAYLOAD");
+    console.log(JSON.stringify(req.body, null, 2));
+    console.log("======================================");
+
+    return res.status(200).json({
+      success: true,
+      message: "Global NeoDove webhook received",
+    });
+  } catch (error) {
+    console.error("Global webhook error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Webhook error",
+    });
+  }
+});
 // ======================================================
 // 404 Handler
 // ======================================================
