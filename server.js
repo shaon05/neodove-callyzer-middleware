@@ -642,6 +642,44 @@ app.post("/neodove/global-test", (req, res) => {
     });
   }
 });
+
+// ======================================================
+// Callyzer Webhook Test
+// ======================================================
+
+app.post("/callyzer/webhook-test", (req, res) => {
+  try {
+    console.log("======================================");
+    console.log("CALLYZER WEBHOOK RECEIVED");
+
+    console.log("Headers:");
+    console.log(req.headers);
+
+    console.log("Payload:");
+    console.log(
+      JSON.stringify(req.body, null, 2)
+    );
+
+    console.log("======================================");
+
+    return res.status(200).json({
+      success: true,
+      message: "Callyzer webhook received",
+    });
+
+  } catch (error) {
+    console.error(
+      "Callyzer webhook error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Webhook processing failed",
+    });
+  }
+});
+
 // ======================================================
 // 404 Handler
 // ======================================================
