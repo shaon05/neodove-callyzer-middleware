@@ -1754,7 +1754,57 @@ app.post(
   "/neodove/lead",
   processNeoDoveWebhook
 );
+// ======================================================
+// TEMPORARY: NEODOVE LEAD DISPOSE DEBUG
+// ======================================================
 
+app.post(
+  "/neodove/dispose-debug",
+  (req, res) => {
+    const secret =
+      req.get("x-webhook-secret");
+
+    if (
+      !NEODOVE_WEBHOOK_SECRET ||
+      secret !== NEODOVE_WEBHOOK_SECRET
+    ) {
+      return res
+        .status(401)
+        .json({
+          success: false,
+          message: "Unauthorized",
+        });
+    }
+
+    console.log(
+      "======================================"
+    );
+
+    console.log(
+      "🔥 NEODOVE LEAD DISPOSE EVENT"
+    );
+
+    console.log(
+      JSON.stringify(
+        req.body,
+        null,
+        2
+      )
+    );
+
+    console.log(
+      "======================================"
+    );
+
+    return res
+      .status(200)
+      .json({
+        success: true,
+        message:
+          "Lead Dispose payload received",
+      });
+  }
+);
 // ======================================================
 // 404
 // MUST ALWAYS BE LAST
