@@ -1,0 +1,32 @@
+NeoDove → Callyzer Middleware License
+
+Copyright (c) 2026. All rights reserved.
+
+This software and its associated source code, documentation, configuration,
+and related files (the "Software") are proprietary and intended for authorized
+internal use only.
+
+Permission is granted to authorized users of the project to use, modify,
+deploy, and maintain the Software for internal business purposes.
+
+You may not, without prior written permission from the copyright holder:
+
+1. Sell, sublicense, rent, lease, or commercially redistribute the Software.
+2. Publish or redistribute the source code to third parties.
+3. Remove or alter copyright, ownership, or attribution notices.
+4. Use the Software, in whole or in part, to create a competing product or
+   service for unauthorized distribution.
+5. Share API keys, webhook secrets, credentials, or other confidential
+   configuration included with or used by the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM,
+DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR
+OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE
+OR OTHER DEALINGS IN THE SOFTWARE.
+
+Third-party services, APIs, SDKs, and libraries used by this project remain
+subject to their own licenses, terms of service, and usage policies.
