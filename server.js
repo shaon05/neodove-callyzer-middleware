@@ -9,27 +9,26 @@ app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 3000;
 
-const CALLYZER_API_KEY =
-  process.env.CALLYZER_API_KEY;
+const CALLYZER_API_KEY = process.env.CALLYZER_API_KEY;
+const CALLYZER_BASE_URL = process.env.CALLYZER_BASE_URL;
 
-const CALLYZER_BASE_URL =
-  process.env.CALLYZER_BASE_URL;
+const NEODOVE_WEBHOOK_SECRET =
+  process.env.NEODOVE_WEBHOOK_SECRET;
 
 const CALLYZER_WEBHOOK_SECRET =
   process.env.CALLYZER_WEBHOOK_SECRET;
 
 
 // ======================================================
-// Phone formatter
+// PHONE FORMATTER
 // ======================================================
 
 function formatIndianPhone(phone) {
   if (!phone) return null;
 
-  let number =
-    String(phone).replace(/\D/g, "");
+  let number = String(phone).replace(/\D/g, "");
 
-  // 09876543210
+  // Example: 09876543210
   if (
     number.length === 11 &&
     number.startsWith("0")
@@ -37,12 +36,12 @@ function formatIndianPhone(phone) {
     number = number.slice(1);
   }
 
-  // 9876543210
+  // Example: 9876543210
   if (number.length === 10) {
     return `91-${number}`;
   }
 
-  // 919876543210
+  // Example: 919876543210
   if (
     number.length === 12 &&
     number.startsWith("91")
@@ -55,7 +54,7 @@ function formatIndianPhone(phone) {
 
 
 // ======================================================
-// Read response safely
+// READ API RESPONSE
 // ======================================================
 
 async function readResponse(response) {
@@ -72,27 +71,30 @@ async function readResponse(response) {
 
 
 // ======================================================
-// Check duplicate lead
+// DUPLICATE LEAD CHECK
 // ======================================================
 
 function isDuplicateLead(data) {
   const text =
-    JSON.stringify(data).toLowerCase();
+    JSON.stringify(data || {})
+      .toLowerCase();
 
   return (
     text.includes("already exists") ||
-    text.includes("already exist")
+    text.includes("already exist") ||
+    text.includes("duplicate")
   );
 }
 
 
 // ======================================================
-// Create Callyzer Lead
+// CREATE CALLYZER LEAD
 // ======================================================
 
 async function createCallyzerLead(
   clientNumber,
-  employeeNumber
+  employeeNumber,
+  clientName = null
 ) {
   const client =
     formatIndianPhone(clientNumber);
@@ -100,21 +102,34 @@ async function createCallyzerLead(
   const employee =
     formatIndianPhone(employeeNumber);
 
-  if (!client || !employee) {
+  if (!client) {
     return {
       success: false,
-      status: "invalid_number",
+      status: "invalid_client_number",
+      clientNumber,
+    };
+  }
+
+  if (!employee) {
+    return {
+      success: false,
+      status: "invalid_employee_number",
+      employeeNumber,
     };
   }
 
   const localNumber =
     client.split("-")[1];
 
+  let finalName =
+    String(clientName || "").trim();
+
+  if (!finalName) {
+    finalName = localNumber;
+  }
 
   const payload = {
-    // We don't need customer's real name.
-    // Phone number becomes the lead name.
-    first_name: localNumber,
+    first_name: finalName,
 
     contact_numbers: [
       client,
@@ -129,20 +144,27 @@ async function createCallyzerLead(
       ],
     },
 
-    // IMPORTANT:
-    // Map calls which already exist
-    // for this customer number.
     is_map_existing_call_logs:
       true,
   };
 
 
   console.log(
-    "Creating Callyzer lead:",
-    {
-      client,
-      employee,
-    }
+    "--------------------------------------"
+  );
+
+  console.log(
+    "Creating Callyzer lead"
+  );
+
+  console.log({
+    name: finalName,
+    client,
+    employee,
+  });
+
+  console.log(
+    "--------------------------------------"
   );
 
 
@@ -202,20 +224,292 @@ async function createCallyzerLead(
 
 
 // ======================================================
-// Health Check
+// HEALTH CHECK
 // ======================================================
 
 app.get("/", (req, res) => {
   res.json({
     success: true,
+
     message:
-      "Callyzer call middleware is running",
+      "NeoDove → Callyzer middleware is running",
+
+    environment:
+      CALLYZER_BASE_URL?.includes(
+        "sandbox"
+      )
+        ? "sandbox"
+        : "production",
   });
 });
 
 
 // ======================================================
-// CALL EVENT → RENDER → CREATE CALLYZER LEAD
+// NEODOVE LEAD → CALLYZER
+//
+// NeoDove decides employee.
+// Render copies that employee to Callyzer.
+// ======================================================
+
+app.post(
+  "/neodove/lead",
+
+  async (req, res) => {
+    try {
+
+      // ----------------------------------------------
+      // Verify NeoDove secret
+      // ----------------------------------------------
+
+      const webhookSecret =
+        req.get(
+          "x-webhook-secret"
+        );
+
+
+      if (
+        !NEODOVE_WEBHOOK_SECRET ||
+        webhookSecret !==
+          NEODOVE_WEBHOOK_SECRET
+      ) {
+
+        console.log(
+          "❌ Invalid NeoDove webhook secret"
+        );
+
+        return res
+          .status(401)
+          .json({
+            success: false,
+            message:
+              "Unauthorized NeoDove webhook",
+          });
+      }
+
+
+      // ----------------------------------------------
+      // Log complete NeoDove payload
+      // ----------------------------------------------
+
+      console.log(
+        "======================================"
+      );
+
+      console.log(
+        "NEODOVE LEAD RECEIVED"
+      );
+
+      console.log(
+        JSON.stringify(
+          req.body,
+          null,
+          2
+        )
+      );
+
+      console.log(
+        "======================================"
+      );
+
+
+      // ----------------------------------------------
+      // Get lead information
+      // ----------------------------------------------
+
+      const leadName =
+        req.body.name ||
+        req.body.lead_name ||
+        req.body.contact_name ||
+        null;
+
+
+      const mobile =
+        req.body.mobile ||
+        req.body.phone ||
+        req.body.phone_number ||
+        req.body.contact_number ||
+        null;
+
+
+      // ----------------------------------------------
+      // Get NeoDove assigned employee
+      //
+      // Supports multiple possible payload names.
+      // ----------------------------------------------
+
+      const agentName =
+        req.body.agent_name ||
+        req.body.agentName ||
+        req.body.assigned_agent_name ||
+        req.body.assignee_name ||
+        req.body.agent?.name ||
+        null;
+
+
+      const agentNumber =
+        req.body.agent_number ||
+        req.body.agentNumber ||
+        req.body.assigned_agent_number ||
+        req.body.assignee_number ||
+        req.body.agent?.number ||
+        req.body.agent?.phone ||
+        null;
+
+
+      // ----------------------------------------------
+      // Validate lead phone
+      // ----------------------------------------------
+
+      if (!mobile) {
+        console.log(
+          "⚠️ NeoDove payload has no mobile"
+        );
+
+        return res
+          .status(200)
+          .json({
+            success: true,
+            status:
+              "ignored_missing_mobile",
+
+            message:
+              "Lead received but mobile number is missing",
+          });
+      }
+
+
+      // ----------------------------------------------
+      // Most important test:
+      // Did NeoDove send assigned employee?
+      // ----------------------------------------------
+
+      if (!agentNumber) {
+
+        console.log(
+          "⚠️ NeoDove lead received but agent_number is missing"
+        );
+
+        console.log({
+          leadName,
+          mobile,
+          agentName,
+        });
+
+
+        return res
+          .status(200)
+          .json({
+            success: true,
+
+            status:
+              "received_agent_missing",
+
+            message:
+              "NeoDove lead received, but assigned agent number was not included",
+
+            lead: {
+              name:
+                leadName,
+
+              mobile,
+
+              agent_name:
+                agentName,
+
+              agent_number:
+                null,
+            },
+          });
+      }
+
+
+      // ----------------------------------------------
+      // Create same lead in Callyzer
+      // assigned to same NeoDove employee
+      // ----------------------------------------------
+
+      const callyzerResult =
+        await createCallyzerLead(
+          mobile,
+          agentNumber,
+          leadName
+        );
+
+
+      console.log(
+        "======================================"
+      );
+
+      console.log(
+        "CALLYZER RESULT"
+      );
+
+      console.log(
+        JSON.stringify(
+          callyzerResult,
+          null,
+          2
+        )
+      );
+
+      console.log(
+        "======================================"
+      );
+
+
+      return res
+        .status(200)
+        .json({
+          success: true,
+
+          message:
+            "NeoDove lead processed",
+
+          neodove: {
+            name:
+              leadName,
+
+            mobile,
+
+            agent_name:
+              agentName,
+
+            agent_number:
+              agentNumber,
+          },
+
+          callyzer:
+            callyzerResult,
+        });
+
+    } catch (error) {
+
+      console.error(
+        "❌ NeoDove webhook error:",
+        error
+      );
+
+
+      return res
+        .status(500)
+        .json({
+          success: false,
+
+          message:
+            "NeoDove webhook processing failed",
+
+          error:
+            error.message,
+        });
+    }
+  }
+);
+
+
+// ======================================================
+// CALLYZER CALL WEBHOOK
+//
+// Keep this for Callyzer testing.
 // ======================================================
 
 app.post(
@@ -223,10 +517,6 @@ app.post(
 
   async (req, res) => {
     try {
-
-      // ------------------------------------------------
-      // Verify webhook secret
-      // ------------------------------------------------
 
       const signature =
         req.get(
@@ -239,29 +529,29 @@ app.post(
         signature !==
           CALLYZER_WEBHOOK_SECRET
       ) {
+
         return res
           .status(401)
           .json({
             success: false,
+
             message:
               "Unauthorized Callyzer webhook",
           });
       }
 
 
-      // ------------------------------------------------
-      // Callyzer sends array
-      // ------------------------------------------------
-
       const payload =
         req.body;
 
 
       if (!Array.isArray(payload)) {
+
         return res
           .status(400)
           .json({
             success: false,
+
             message:
               "Invalid Callyzer webhook payload",
           });
@@ -274,9 +564,9 @@ app.post(
         new Set();
 
 
-      // ------------------------------------------------
+      // ----------------------------------------------
       // Employees
-      // ------------------------------------------------
+      // ----------------------------------------------
 
       for (
         const employee
@@ -298,32 +588,33 @@ app.post(
             : [];
 
 
-        // ----------------------------------------------
-        // Calls
-        // ----------------------------------------------
+        // --------------------------------------------
+        // Individual calls
+        // --------------------------------------------
 
         for (
           const call
           of callLogs
         ) {
 
-          const clientNumber =
-            call.client_number;
-
-
           console.log(
             "======================================"
           );
 
           console.log(
-            "CALL EVENT RECEIVED"
+            "CALLYZER CALL EVENT"
           );
 
           console.log({
             employeeName,
+
             employeeNumber,
 
-            clientNumber,
+            clientName:
+              call.client_name,
+
+            clientNumber:
+              call.client_number,
 
             callId:
               call.id,
@@ -333,12 +624,6 @@ app.post(
 
             duration:
               call.duration,
-
-            callDate:
-              call.call_date,
-
-            callTime:
-              call.call_time,
 
             recordingUrl:
               call.call_recording_url ||
@@ -350,9 +635,9 @@ app.post(
           );
 
 
-          // --------------------------------------------
+          // ------------------------------------------
           // Only outgoing calls
-          // --------------------------------------------
+          // ------------------------------------------
 
           if (
             String(
@@ -366,40 +651,36 @@ app.post(
           }
 
 
-          // --------------------------------------------
-          // Validate numbers
-          // --------------------------------------------
-
-          const formattedClient =
+          const client =
             formatIndianPhone(
-              clientNumber
+              call.client_number
             );
 
-          const formattedEmployee =
+
+          const employeePhone =
             formatIndianPhone(
               employeeNumber
             );
 
 
           if (
-            !formattedClient ||
-            !formattedEmployee
+            !client ||
+            !employeePhone
           ) {
+
             console.log(
-              "Skipping invalid/test numbers"
+              "Skipping invalid/test number"
             );
 
             continue;
           }
 
 
-          // --------------------------------------------
-          // Don't process same number twice
-          // in one webhook request
-          // --------------------------------------------
+          // Avoid same lead more than once
+          // in same webhook payload
 
           const key =
-            `${formattedEmployee}:${formattedClient}`;
+            `${employeePhone}:${client}`;
 
 
           if (
@@ -412,31 +693,33 @@ app.post(
           processed.add(key);
 
 
-          // --------------------------------------------
-          // Create Callyzer lead
-          // --------------------------------------------
-
           const leadResult =
             await createCallyzerLead(
-              clientNumber,
-              employeeNumber
+              call.client_number,
+
+              employeeNumber,
+
+              call.client_name
             );
 
 
           results.push({
+            clientNumber:
+              client,
+
             employeeName,
 
             employeeNumber:
-              formattedEmployee,
-
-            clientNumber:
-              formattedClient,
+              employeePhone,
 
             callId:
               call.id,
 
             duration:
               call.duration,
+
+            callType:
+              call.call_type,
 
             recordingUrl:
               call.call_recording_url ||
@@ -445,32 +728,6 @@ app.post(
             lead:
               leadResult,
           });
-
-
-          if (
-            leadResult.status ===
-            "created"
-          ) {
-            console.log(
-              `✅ Lead created: ${formattedClient}`
-            );
-          }
-
-          else if (
-            leadResult.status ===
-            "already_exists"
-          ) {
-            console.log(
-              `ℹ️ Lead already exists: ${formattedClient}`
-            );
-          }
-
-          else {
-            console.error(
-              `❌ Lead creation failed: ${formattedClient}`,
-              leadResult
-            );
-          }
         }
       }
 
@@ -492,7 +749,7 @@ app.post(
     } catch (error) {
 
       console.error(
-        "Webhook error:",
+        "❌ Callyzer webhook error:",
         error
       );
 
@@ -503,7 +760,7 @@ app.post(
           success: false,
 
           message:
-            "Webhook processing failed",
+            "Callyzer webhook processing failed",
 
           error:
             error.message,
@@ -515,35 +772,50 @@ app.post(
 
 // ======================================================
 // 404
+// IMPORTANT: KEEP THIS LAST
 // ======================================================
 
 app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    message:
-      "Route not found",
-  });
+  res
+    .status(404)
+    .json({
+      success: false,
+      message:
+        "Route not found",
+    });
 });
 
 
 // ======================================================
-// Server
+// SERVER
 // ======================================================
 
 app.listen(
   PORT,
   "0.0.0.0",
+
   () => {
+
     console.log(
       "======================================"
     );
 
     console.log(
-      "Callyzer call middleware running"
+      "NeoDove → Callyzer middleware running"
     );
 
     console.log(
       `Port: ${PORT}`
+    );
+
+    console.log(
+      `Callyzer environment: ${
+        CALLYZER_BASE_URL?.includes(
+          "sandbox"
+        )
+          ? "SANDBOX"
+          : "PRODUCTION"
+      }`
     );
 
     console.log(
