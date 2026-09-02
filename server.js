@@ -1,6 +1,18 @@
 import "dotenv/config";
 import express from "express";
 import helmet from "helmet";
+import multer from "multer";
+import ExcelJS from "exceljs";
+
+const NEODOVE_IMPORT_URL =
+  process.env.NEODOVE_IMPORT_URL;
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10 MB
+  },
+});
 
 const app = express();
 
@@ -250,6 +262,167 @@ app.get("/", (req, res) => {
 // NeoDove decides employee.
 // Render copies that employee to Callyzer.
 // ======================================================
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeHeader(value) {
+  return String(value || "")
+    .replace(/\n/g, " ")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+
+// Excel column → NeoDove path
+const EXCEL_FIELD_MAP = {
+  // Required phone aliases
+  "mobile": "mobile",
+  "mobile no": "mobile",
+  "mobile number": "mobile",
+  "phone": "mobile",
+  "phone number": "mobile",
+  "contact number": "mobile",
+
+  // Name
+  "name": "name",
+  "candidate name": "name",
+  "candidate full name": "name",
+  "candidates full name": "name",
+  "student name": "name",
+  "contact name": "name",
+
+  // Email
+  "email": "email",
+  "email address": "email",
+
+  // Optional NeoDove properties
+  "stream": "stream",
+  "ent given yes no": "ent_given",
+  "exam name": "exam_name",
+  "12th stream": "twelfth_stream",
+  "location": "location",
+  "higher studies yes no": "higher_studies",
+  "giving students": "giving_students",
+  "visit college": "visit_college",
+  "college visit date": "college_visit_date",
+  "mou": "mou",
+  "college name": "college_name",
+
+  "guardian s name": "guardian_name",
+  "guardian name": "guardian_name",
+
+  "compulsory elective 1":
+    "compulsory_elective_1",
+
+  "compulsory elective 2":
+    "compulsory_elective_2",
+
+  "compulsory elective 3":
+    "compulsory_elective_3",
+
+  "optional elective":
+    "optional_elective",
+
+  // These will work when corresponding
+  // NeoDove custom paths are configured
+  "school name": "school_name",
+  "gender": "gender",
+};
+
+
+function getCellValue(cell) {
+  if (!cell) return "";
+
+  const value = cell.value;
+
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  if (typeof value === "object") {
+    if (value.text) {
+      return String(value.text).trim();
+    }
+
+    if (value.result !== undefined) {
+      return String(value.result).trim();
+    }
+
+    if (Array.isArray(value.richText)) {
+      return value.richText
+        .map((item) => item.text)
+        .join("")
+        .trim();
+    }
+  }
+
+  return String(value).trim();
+}
+
+
+function normalizeMobile(value) {
+  if (!value) return null;
+
+  let number =
+    String(value).replace(/\D/g, "");
+
+  // 09876543210
+  if (
+    number.length === 11 &&
+    number.startsWith("0")
+  ) {
+    number = number.slice(1);
+  }
+
+  // 919876543210
+  if (
+    number.length === 12 &&
+    number.startsWith("91")
+  ) {
+    number = number.slice(2);
+  }
+
+  if (number.length !== 10) {
+    return null;
+  }
+
+  return number;
+}
+
+
+async function sendLeadToNeoDove(lead) {
+  const response = await fetch(
+    NEODOVE_IMPORT_URL,
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type":
+          "application/json",
+      },
+
+      body: JSON.stringify(lead),
+    }
+  );
+
+  const text = await response.text();
+
+  let data;
+
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = text;
+  }
+
+  return {
+    success: response.ok,
+    status: response.status,
+    data,
+  };
+}
 
 app.post(
   "/neodove/lead",
@@ -768,7 +941,451 @@ app.post(
     }
   }
 );
+app.get("/upload", (req, res) => {
+  res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+  <title>NeoDove Lead Import</title>
 
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f5f6f8;
+      padding: 40px;
+    }
+
+    .box {
+      max-width: 500px;
+      margin: auto;
+      background: white;
+      padding: 30px;
+      border-radius: 12px;
+      box-shadow: 0 5px 20px rgba(0,0,0,.08);
+    }
+
+    h2 {
+      margin-top: 0;
+    }
+
+    input {
+      display: block;
+      width: 100%;
+      margin: 15px 0;
+      padding: 10px;
+      box-sizing: border-box;
+    }
+
+    button {
+      width: 100%;
+      padding: 12px;
+      background: #111;
+      color: white;
+      border: 0;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .note {
+      font-size: 13px;
+      color: #666;
+      margin-top: 15px;
+    }
+  </style>
+</head>
+
+<body>
+
+<div class="box">
+
+  <h2>Upload Leads</h2>
+
+  <form
+    action="/upload-leads"
+    method="POST"
+    enctype="multipart/form-data"
+  >
+
+    <label>Excel File</label>
+
+    <input
+      type="file"
+      name="excel"
+      accept=".xlsx"
+      required
+    />
+
+    <label>
+      Maximum rows to test
+    </label>
+
+    <input
+      type="number"
+      name="limit"
+      placeholder="Example: 2"
+      min="1"
+    />
+
+    <button type="submit">
+      Upload to NeoDove
+    </button>
+
+  </form>
+
+  <div class="note">
+    Only Mobile Number is mandatory.
+    Leave Maximum Rows blank later to import
+    the entire Excel file.
+  </div>
+
+</div>
+
+</body>
+</html>
+  `);
+});
+
+app.post(
+  "/upload-leads",
+
+  upload.single("excel"),
+
+  async (req, res) => {
+    try {
+
+      if (!NEODOVE_IMPORT_URL) {
+        return res.status(500).json({
+          success: false,
+          message:
+            "NEODOVE_IMPORT_URL is not configured",
+        });
+      }
+
+
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Please upload an Excel file",
+        });
+      }
+
+
+      const workbook =
+        new ExcelJS.Workbook();
+
+
+      await workbook.xlsx.load(
+        req.file.buffer
+      );
+
+
+      const worksheet =
+        workbook.worksheets[0];
+
+
+      if (!worksheet) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Excel file has no worksheet",
+        });
+      }
+
+
+      // --------------------------------------------
+      // Read headers
+      // --------------------------------------------
+
+      const headerRow =
+        worksheet.getRow(1);
+
+
+      const columns = {};
+
+
+      headerRow.eachCell(
+        { includeEmpty: false },
+
+        (cell, columnNumber) => {
+
+          const originalHeader =
+            getCellValue(cell);
+
+
+          const normalized =
+            normalizeHeader(
+              originalHeader
+            );
+
+
+          const neodoveField =
+            EXCEL_FIELD_MAP[
+              normalized
+            ];
+
+
+          if (neodoveField) {
+            columns[columnNumber] =
+              neodoveField;
+          }
+        }
+      );
+
+
+      // --------------------------------------------
+      // Mobile column must exist
+      // --------------------------------------------
+
+      const hasMobile =
+        Object.values(
+          columns
+        ).includes("mobile");
+
+
+      if (!hasMobile) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+
+            message:
+              "Could not find a mobile/phone number column in the Excel file",
+          });
+      }
+
+
+      const limit =
+        req.body.limit
+          ? Number(req.body.limit)
+          : null;
+
+
+      const results = [];
+
+      let sent = 0;
+      let skipped = 0;
+      let failed = 0;
+
+
+      // --------------------------------------------
+      // Process rows
+      // --------------------------------------------
+
+      for (
+        let rowNumber = 2;
+        rowNumber <= worksheet.rowCount;
+        rowNumber++
+      ) {
+
+        if (
+          limit &&
+          sent >= limit
+        ) {
+          break;
+        }
+
+
+        const row =
+          worksheet.getRow(
+            rowNumber
+          );
+
+
+        const lead = {};
+
+
+        // ------------------------------------------
+        // Only use fields that actually exist
+        // ------------------------------------------
+
+        for (
+          const [
+            columnNumber,
+            fieldName,
+          ] of Object.entries(
+            columns
+          )
+        ) {
+
+          const value =
+            getCellValue(
+              row.getCell(
+                Number(
+                  columnNumber
+                )
+              )
+            );
+
+
+          // Blank value = don't send field
+          if (!value) {
+            continue;
+          }
+
+
+          lead[fieldName] =
+            value;
+        }
+
+
+        // ------------------------------------------
+        // Mobile is mandatory
+        // ------------------------------------------
+
+        const mobile =
+          normalizeMobile(
+            lead.mobile
+          );
+
+
+        if (!mobile) {
+
+          skipped++;
+
+          results.push({
+            row: rowNumber,
+            status: "skipped",
+            reason:
+              "Mobile number missing or invalid",
+          });
+
+          continue;
+        }
+
+
+        lead.mobile =
+          mobile;
+
+
+        // Name is optional.
+        // If missing, don't send it.
+        if (
+          lead.name &&
+          !String(
+            lead.name
+          ).trim()
+        ) {
+          delete lead.name;
+        }
+
+
+        try {
+
+          console.log(
+            `Sending Excel row ${rowNumber} to NeoDove`
+          );
+
+          console.log(lead);
+
+
+          const result =
+            await sendLeadToNeoDove(
+              lead
+            );
+
+
+          if (result.success) {
+
+            sent++;
+
+            results.push({
+              row: rowNumber,
+              mobile,
+              name:
+                lead.name || "",
+              status: "sent",
+            });
+
+          } else {
+
+            failed++;
+
+            results.push({
+              row: rowNumber,
+              mobile,
+              status: "failed",
+              response:
+                result.data,
+            });
+          }
+
+
+          /*
+            Important:
+
+            We intentionally send leads slowly.
+
+            NeoDove creates the lead
+            → assigns employee
+            → sends webhook
+            → Render calls Callyzer.
+
+            Callyzer Sandbox has a rate limit,
+            so do not blast all rows at once.
+          */
+
+          await sleep(1500);
+
+        } catch (error) {
+
+          failed++;
+
+          results.push({
+            row: rowNumber,
+            mobile,
+            status: "failed",
+            error:
+              error.message,
+          });
+        }
+      }
+
+
+      return res.json({
+        success: true,
+
+        message:
+          "Excel processing completed",
+
+        file:
+          req.file.originalname,
+
+        worksheet:
+          worksheet.name,
+
+        sent,
+
+        skipped,
+
+        failed,
+
+        results,
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "Excel upload error:",
+        error
+      );
+
+
+      return res
+        .status(500)
+        .json({
+          success: false,
+
+          message:
+            "Excel import failed",
+
+          error:
+            error.message,
+        });
+    }
+  }
+);
 
 // ======================================================
 // 404
