@@ -1,34 +1,64 @@
 import "dotenv/config";
 import express from "express";
 import helmet from "helmet";
-import multer from "multer";
-import ExcelJS from "exceljs";
 
-const NEODOVE_IMPORT_URL =
-  process.env.NEODOVE_IMPORT_URL;
-
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10 MB
-  },
-});
+// ======================================================
+// APP
+// ======================================================
 
 const app = express();
 
 app.use(helmet());
 app.use(express.json({ limit: "1mb" }));
 
+// ======================================================
+// ENVIRONMENT
+// ======================================================
+
 const PORT = process.env.PORT || 3000;
 
-const CALLYZER_API_KEY = process.env.CALLYZER_API_KEY;
-const CALLYZER_BASE_URL = process.env.CALLYZER_BASE_URL;
+const CALLYZER_API_KEY =
+  process.env.CALLYZER_API_KEY;
+
+const CALLYZER_BASE_URL =
+  process.env.CALLYZER_BASE_URL;
 
 const NEODOVE_WEBHOOK_SECRET =
   process.env.NEODOVE_WEBHOOK_SECRET;
 
-const CALLYZER_WEBHOOK_SECRET =
-  process.env.CALLYZER_WEBHOOK_SECRET;
+
+// ======================================================
+// VALIDATE ENV
+// ======================================================
+
+if (!CALLYZER_API_KEY) {
+  console.warn(
+    "⚠️ CALLYZER_API_KEY is missing"
+  );
+}
+
+if (!CALLYZER_BASE_URL) {
+  console.warn(
+    "⚠️ CALLYZER_BASE_URL is missing"
+  );
+}
+
+if (!NEODOVE_WEBHOOK_SECRET) {
+  console.warn(
+    "⚠️ NEODOVE_WEBHOOK_SECRET is missing"
+  );
+}
+
+
+// ======================================================
+// SLEEP
+// ======================================================
+
+function sleep(ms) {
+  return new Promise((resolve) =>
+    setTimeout(resolve, ms)
+  );
+}
 
 
 // ======================================================
@@ -38,9 +68,11 @@ const CALLYZER_WEBHOOK_SECRET =
 function formatIndianPhone(phone) {
   if (!phone) return null;
 
-  let number = String(phone).replace(/\D/g, "");
+  let number =
+    String(phone).replace(/\D/g, "");
 
-  // Example: 09876543210
+  // Example:
+  // 09876543210
   if (
     number.length === 11 &&
     number.startsWith("0")
@@ -48,28 +80,30 @@ function formatIndianPhone(phone) {
     number = number.slice(1);
   }
 
-  // Example: 9876543210
-  if (number.length === 10) {
-    return `91-${number}`;
-  }
-
-  // Example: 919876543210
+  // Example:
+  // 919876543210
   if (
     number.length === 12 &&
     number.startsWith("91")
   ) {
-    return `91-${number.slice(2)}`;
+    number = number.slice(2);
   }
 
-  return null;
+  // Final expected Indian mobile:
+  // 9876543210
+  if (number.length !== 10) {
+    return null;
+  }
+
+  return `91-${number}`;
 }
 
 
 // ======================================================
-// READ API RESPONSE
+// READ API RESPONSE SAFELY
 // ======================================================
 
-async function readResponse(response) {
+async function readApiResponse(response) {
   const text = await response.text();
 
   try {
@@ -83,71 +117,143 @@ async function readResponse(response) {
 
 
 // ======================================================
-// DUPLICATE LEAD CHECK
+// CALLYZER QUEUE
+//
+// Callyzer API currently allows one request
+// every ~2 seconds.
 // ======================================================
 
-function isDuplicateLead(data) {
-  const text =
-    JSON.stringify(data || {})
-      .toLowerCase();
+let callyzerQueue =
+  Promise.resolve();
 
-  return (
-    text.includes("already exists") ||
-    text.includes("already exist") ||
-    text.includes("duplicate")
-  );
+let lastCallyzerRequestAt = 0;
+
+
+async function respectCallyzerRateLimit() {
+  // Use slightly more than 2 seconds
+  const minimumGap = 2200;
+
+  const now = Date.now();
+
+  const elapsed =
+    now - lastCallyzerRequestAt;
+
+  if (elapsed < minimumGap) {
+    await sleep(
+      minimumGap - elapsed
+    );
+  }
+
+  lastCallyzerRequestAt =
+    Date.now();
+}
+
+
+function queueCallyzerJob(job) {
+  const result =
+    callyzerQueue.then(
+      async () => {
+
+        await respectCallyzerRateLimit();
+
+        return job();
+      }
+    );
+
+  // Keep queue alive even if one request fails
+  callyzerQueue =
+    result.catch((error) => {
+      console.error(
+        "Callyzer queue job failed:",
+        error.message
+      );
+    });
+
+  return result;
 }
 
 
 // ======================================================
-// CREATE CALLYZER LEAD
+// CALLYZER CREATE / UPDATE LEAD
 // ======================================================
 
-async function createCallyzerLead(
-  clientNumber,
-  employeeNumber,
-  clientName = null
-) {
+async function upsertCallyzerLead({
+  name,
+  mobile,
+  agentNumber,
+}) {
+
   const client =
-    formatIndianPhone(clientNumber);
+    formatIndianPhone(mobile);
 
   const employee =
-    formatIndianPhone(employeeNumber);
+    formatIndianPhone(agentNumber);
+
+
+  // ----------------------------------------------
+  // Validate client
+  // ----------------------------------------------
 
   if (!client) {
     return {
       success: false,
-      status: "invalid_client_number",
-      clientNumber,
+      status:
+        "invalid_client_number",
+      mobile,
     };
   }
+
+
+  // ----------------------------------------------
+  // Validate employee
+  // ----------------------------------------------
 
   if (!employee) {
     return {
       success: false,
-      status: "invalid_employee_number",
-      employeeNumber,
+      status:
+        "invalid_employee_number",
+      agentNumber,
     };
   }
+
 
   const localNumber =
     client.split("-")[1];
 
-  let finalName =
-    String(clientName || "").trim();
 
-  if (!finalName) {
+  // ----------------------------------------------
+  // Lead name
+  // ----------------------------------------------
+
+  let finalName =
+    String(name || "").trim();
+
+
+  // Callyzer first_name needs useful value.
+  if (finalName.length < 3) {
     finalName = localNumber;
   }
 
+
+  // ----------------------------------------------
+  // Callyzer payload
+  // ----------------------------------------------
+
   const payload = {
-    first_name: finalName,
+
+    first_name:
+      finalName,
+
 
     contact_numbers: [
       client,
     ],
 
+
+    // Current NeoDove agent
     assignment: {
+
       strategy:
         "Assign to All Selected",
 
@@ -156,17 +262,36 @@ async function createCallyzerLead(
       ],
     },
 
+
+    // If this number already exists in Callyzer:
+    //
+    // DON'T overwrite name/details
+    // DO overwrite employee assignment
+    existing_lead: {
+
+      lead_details:
+        "ignore",
+
+      assignee:
+        "overwrite",
+
+      lead_tags:
+        "ignore",
+    },
+
+
+    // Map previously synced call logs
     is_map_existing_call_logs:
       true,
   };
 
 
   console.log(
-    "--------------------------------------"
+    "======================================"
   );
 
   console.log(
-    "Creating Callyzer lead"
+    "CALLYZER UPSERT"
   );
 
   console.log({
@@ -176,62 +301,137 @@ async function createCallyzerLead(
   });
 
   console.log(
-    "--------------------------------------"
+    "======================================"
   );
 
 
-  const response =
-    await fetch(
-      `${CALLYZER_BASE_URL}/lead/save`,
-      {
-        method: "POST",
+  // ====================================================
+  // API REQUEST + RETRY
+  // ====================================================
 
-        headers: {
-          Authorization:
-            `Bearer ${CALLYZER_API_KEY}`,
+  for (
+    let attempt = 1;
+    attempt <= 3;
+    attempt++
+  ) {
 
-          "Content-Type":
-            "application/json",
+    try {
 
-          Accept:
-            "application/json",
-        },
+      const response =
+        await fetch(
+          `${CALLYZER_BASE_URL}/lead/save`,
+          {
+            method: "POST",
 
-        body:
-          JSON.stringify(payload),
+            headers: {
+
+              Authorization:
+                `Bearer ${CALLYZER_API_KEY}`,
+
+              "Content-Type":
+                "application/json",
+
+              Accept:
+                "application/json",
+            },
+
+            body:
+              JSON.stringify(
+                payload
+              ),
+          }
+        );
+
+
+      const data =
+        await readApiResponse(
+          response
+        );
+
+
+      // ------------------------------------------
+      // SUCCESS
+      // ------------------------------------------
+
+      if (response.ok) {
+
+        return {
+          success: true,
+
+          status:
+            "created_or_updated",
+
+          httpStatus:
+            response.status,
+
+          data,
+        };
       }
-    );
 
 
-  const data =
-    await readResponse(response);
+      // ------------------------------------------
+      // RATE LIMIT
+      // ------------------------------------------
+
+      if (
+        response.status === 429 &&
+        attempt < 3
+      ) {
+
+        console.log(
+          `⚠️ Callyzer rate limit. Retry ${attempt}/2`
+        );
+
+        await sleep(2500);
+
+        continue;
+      }
 
 
-  if (response.ok) {
-    return {
-      success: true,
-      status: "created",
-      data,
-    };
+      // ------------------------------------------
+      // API ERROR
+      // ------------------------------------------
+
+      return {
+        success: false,
+
+        status:
+          "callyzer_api_error",
+
+        httpStatus:
+          response.status,
+
+        data,
+      };
+
+
+    } catch (error) {
+
+      console.error(
+        "Callyzer request error:",
+        error
+      );
+
+
+      if (attempt < 3) {
+
+        await sleep(2500);
+
+        continue;
+      }
+
+
+      return {
+        success: false,
+
+        status:
+          "network_error",
+
+        error:
+          error.message,
+      };
+    }
   }
-
-
-  if (isDuplicateLead(data)) {
-    return {
-      success: true,
-      status: "already_exists",
-      data,
-    };
-  }
-
-
-  return {
-    success: false,
-    status: "failed",
-    httpStatus:
-      response.status,
-    data,
-  };
 }
 
 
@@ -240,7 +440,9 @@ async function createCallyzerLead(
 // ======================================================
 
 app.get("/", (req, res) => {
+
   res.json({
+
     success: true,
 
     message:
@@ -257,184 +459,119 @@ app.get("/", (req, res) => {
 
 
 // ======================================================
-// NEODOVE LEAD → CALLYZER
-//
-// NeoDove decides employee.
-// Render copies that employee to Callyzer.
+// NEO DOVE EVENT PARSER
 // ======================================================
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
-function normalizeHeader(value) {
-  return String(value || "")
-    .replace(/\n/g, " ")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
+function parseNeoDoveEvent(body) {
 
+  const leadName =
 
-// Excel column → NeoDove path
-const EXCEL_FIELD_MAP = {
-  // Required phone aliases
-  "mobile": "mobile",
-  "mobile no": "mobile",
-  "mobile number": "mobile",
-  "phone": "mobile",
-  "phone number": "mobile",
-  "contact number": "mobile",
+    body.name ||
 
-  // Name
-  "name": "name",
-  "candidate name": "name",
-  "candidate full name": "name",
-  "candidates full name": "name",
-  "student name": "name",
-  "contact name": "name",
+    body.lead_name ||
 
-  // Email
-  "email": "email",
-  "email address": "email",
+    body.contact_name ||
 
-  // Optional NeoDove properties
-  "stream": "stream",
-  "ent given yes no": "ent_given",
-  "exam name": "exam_name",
-  "12th stream": "twelfth_stream",
-  "location": "location",
-  "higher studies yes no": "higher_studies",
-  "giving students": "giving_students",
-  "visit college": "visit_college",
-  "college visit date": "college_visit_date",
-  "mou": "mou",
-  "college name": "college_name",
-
-  "guardian s name": "guardian_name",
-  "guardian name": "guardian_name",
-
-  "compulsory elective 1":
-    "compulsory_elective_1",
-
-  "compulsory elective 2":
-    "compulsory_elective_2",
-
-  "compulsory elective 3":
-    "compulsory_elective_3",
-
-  "optional elective":
-    "optional_elective",
-
-  // These will work when corresponding
-  // NeoDove custom paths are configured
-  "school name": "school_name",
-  "gender": "gender",
-};
+    null;
 
 
-function getCellValue(cell) {
-  if (!cell) return "";
+  const mobile =
 
-  const value = cell.value;
+    body.mobile ||
 
-  if (value === null || value === undefined) {
-    return "";
-  }
+    body.phone ||
 
-  if (typeof value === "object") {
-    if (value.text) {
-      return String(value.text).trim();
-    }
+    body.phone_number ||
 
-    if (value.result !== undefined) {
-      return String(value.result).trim();
-    }
+    body.contact_number ||
 
-    if (Array.isArray(value.richText)) {
-      return value.richText
-        .map((item) => item.text)
-        .join("")
-        .trim();
-    }
-  }
-
-  return String(value).trim();
-}
+    null;
 
 
-function normalizeMobile(value) {
-  if (!value) return null;
+  const agentName =
 
-  let number =
-    String(value).replace(/\D/g, "");
+    body.agent_name ||
 
-  // 09876543210
-  if (
-    number.length === 11 &&
-    number.startsWith("0")
-  ) {
-    number = number.slice(1);
-  }
+    body.agentName ||
 
-  // 919876543210
-  if (
-    number.length === 12 &&
-    number.startsWith("91")
-  ) {
-    number = number.slice(2);
-  }
+    body.assigned_agent_name ||
 
-  if (number.length !== 10) {
-    return null;
-  }
+    body.assignee_name ||
 
-  return number;
-}
+    body.agent?.name ||
+
+    null;
 
 
-async function sendLeadToNeoDove(lead) {
-  const response = await fetch(
-    NEODOVE_IMPORT_URL,
-    {
-      method: "POST",
+  const agentNumber =
 
-      headers: {
-        "Content-Type":
-          "application/json",
-      },
+    body.agent_number ||
 
-      body: JSON.stringify(lead),
-    }
-  );
+    body.agentNumber ||
 
-  const text = await response.text();
+    body.assigned_agent_number ||
 
-  let data;
+    body.assignee_number ||
 
-  try {
-    data = JSON.parse(text);
-  } catch {
-    data = text;
-  }
+    body.agent?.number ||
+
+    body.agent?.phone ||
+
+    null;
+
+
+  const eventName =
+
+    body.event_name ||
+
+    body.event ||
+
+    body.trigger ||
+
+    body.workflow_event ||
+
+    null;
+
 
   return {
-    success: response.ok,
-    status: response.status,
-    data,
+
+    leadName,
+
+    mobile,
+
+    agentName,
+
+    agentNumber,
+
+    eventName,
   };
 }
 
+
+// ======================================================
+// MAIN NEO DOVE ROUTE
+//
+// USE THIS URL FOR:
+//
+// 1. Lead Created
+// 2. Call Connected
+// 3. Call Not Connected
+//
+// https://YOUR-RENDER.onrender.com/neodove/call-sync
+// ======================================================
+
 app.post(
-  "/neodove/lead",
+  "/neodove/call-sync",
 
   async (req, res) => {
+
     try {
 
-      // ----------------------------------------------
-      // Verify NeoDove secret
-      // ----------------------------------------------
+      // --------------------------------------------
+      // AUTHENTICATION
+      // --------------------------------------------
 
-      const webhookSecret =
+      const secret =
         req.get(
           "x-webhook-secret"
         );
@@ -442,7 +579,7 @@ app.post(
 
       if (
         !NEODOVE_WEBHOOK_SECRET ||
-        webhookSecret !==
+        secret !==
           NEODOVE_WEBHOOK_SECRET
       ) {
 
@@ -450,26 +587,29 @@ app.post(
           "❌ Invalid NeoDove webhook secret"
         );
 
+
         return res
           .status(401)
           .json({
+
             success: false,
+
             message:
               "Unauthorized NeoDove webhook",
           });
       }
 
 
-      // ----------------------------------------------
-      // Log complete NeoDove payload
-      // ----------------------------------------------
+      // --------------------------------------------
+      // LOG RAW PAYLOAD
+      // --------------------------------------------
 
       console.log(
         "======================================"
       );
 
       console.log(
-        "NEODOVE LEAD RECEIVED"
+        "NEODOVE EVENT RECEIVED"
       );
 
       console.log(
@@ -485,102 +625,91 @@ app.post(
       );
 
 
-      // ----------------------------------------------
-      // Get lead information
-      // ----------------------------------------------
+      // --------------------------------------------
+      // PARSE DATA
+      // --------------------------------------------
 
-      const leadName =
-        req.body.name ||
-        req.body.lead_name ||
-        req.body.contact_name ||
-        null;
-
-
-      const mobile =
-        req.body.mobile ||
-        req.body.phone ||
-        req.body.phone_number ||
-        req.body.contact_number ||
-        null;
+      const {
+        leadName,
+        mobile,
+        agentName,
+        agentNumber,
+        eventName,
+      } =
+        parseNeoDoveEvent(
+          req.body
+        );
 
 
-      // ----------------------------------------------
-      // Get NeoDove assigned employee
-      //
-      // Supports multiple possible payload names.
-      // ----------------------------------------------
+      console.log(
+        "PARSED NEODOVE EVENT"
+      );
 
-      const agentName =
-        req.body.agent_name ||
-        req.body.agentName ||
-        req.body.assigned_agent_name ||
-        req.body.assignee_name ||
-        req.body.agent?.name ||
-        null;
+      console.log({
 
+        eventName,
 
-      const agentNumber =
-        req.body.agent_number ||
-        req.body.agentNumber ||
-        req.body.assigned_agent_number ||
-        req.body.assignee_number ||
-        req.body.agent?.number ||
-        req.body.agent?.phone ||
-        null;
+        leadName,
+
+        mobile,
+
+        agentName,
+
+        agentNumber,
+      });
 
 
-      // ----------------------------------------------
-      // Validate lead phone
-      // ----------------------------------------------
+      // --------------------------------------------
+      // MOBILE REQUIRED
+      // --------------------------------------------
 
       if (!mobile) {
+
         console.log(
-          "⚠️ NeoDove payload has no mobile"
+          "⚠️ Mobile number missing"
         );
+
 
         return res
           .status(200)
           .json({
+
             success: true,
+
             status:
               "ignored_missing_mobile",
 
             message:
-              "Lead received but mobile number is missing",
+              "NeoDove event received but client mobile is missing",
           });
       }
 
 
-      // ----------------------------------------------
-      // Most important test:
-      // Did NeoDove send assigned employee?
-      // ----------------------------------------------
+      // --------------------------------------------
+      // AGENT REQUIRED
+      // --------------------------------------------
 
       if (!agentNumber) {
 
         console.log(
-          "⚠️ NeoDove lead received but agent_number is missing"
+          "⚠️ Agent number missing"
         );
-
-        console.log({
-          leadName,
-          mobile,
-          agentName,
-        });
 
 
         return res
           .status(200)
           .json({
+
             success: true,
 
             status:
-              "received_agent_missing",
+              "ignored_missing_agent",
 
             message:
-              "NeoDove lead received, but assigned agent number was not included",
+              "NeoDove event received but assigned agent number is missing",
 
             lead: {
+
               name:
                 leadName,
 
@@ -588,26 +717,34 @@ app.post(
 
               agent_name:
                 agentName,
-
-              agent_number:
-                null,
             },
           });
       }
 
 
-      // ----------------------------------------------
-      // Create same lead in Callyzer
-      // assigned to same NeoDove employee
-      // ----------------------------------------------
+      // --------------------------------------------
+      // QUEUE CALLYZER
+      // --------------------------------------------
 
       const callyzerResult =
-        await createCallyzerLead(
-          mobile,
-          agentNumber,
-          leadName
+        await queueCallyzerJob(
+
+          () =>
+            upsertCallyzerLead({
+
+              name:
+                leadName,
+
+              mobile,
+
+              agentNumber,
+            })
         );
 
+
+      // --------------------------------------------
+      // LOG RESULT
+      // --------------------------------------------
 
       console.log(
         "======================================"
@@ -630,15 +767,24 @@ app.post(
       );
 
 
+      // --------------------------------------------
+      // RESPONSE TO NEODOVE
+      // --------------------------------------------
+
       return res
         .status(200)
         .json({
+
           success: true,
 
           message:
-            "NeoDove lead processed",
+            "NeoDove event processed",
+
+          event:
+            eventName,
 
           neodove: {
+
             name:
               leadName,
 
@@ -655,10 +801,11 @@ app.post(
             callyzerResult,
         });
 
+
     } catch (error) {
 
       console.error(
-        "❌ NeoDove webhook error:",
+        "❌ NeoDove processing error:",
         error
       );
 
@@ -666,10 +813,11 @@ app.post(
       return res
         .status(500)
         .json({
+
           success: false,
 
           message:
-            "NeoDove webhook processing failed",
+            "NeoDove event processing failed",
 
           error:
             error.message,
@@ -680,694 +828,132 @@ app.post(
 
 
 // ======================================================
-// CALLYZER CALL WEBHOOK
+// OPTIONAL OLD ROUTE
 //
-// Keep this for Callyzer testing.
+// Keeping this means if any old NeoDove configuration
+// still points to /neodove/lead, it will not 404.
 // ======================================================
 
 app.post(
-  "/callyzer/call-webhook",
+  "/neodove/lead",
 
   async (req, res) => {
+
     try {
 
-      const signature =
+      const secret =
         req.get(
-          "x-callyzer-signature"
+          "x-webhook-secret"
         );
 
 
       if (
-        !CALLYZER_WEBHOOK_SECRET ||
-        signature !==
-          CALLYZER_WEBHOOK_SECRET
+        !NEODOVE_WEBHOOK_SECRET ||
+        secret !==
+          NEODOVE_WEBHOOK_SECRET
       ) {
 
         return res
           .status(401)
           .json({
+
             success: false,
 
             message:
-              "Unauthorized Callyzer webhook",
+              "Unauthorized NeoDove webhook",
           });
       }
 
 
-      const payload =
-        req.body;
+      const {
+        leadName,
+        mobile,
+        agentName,
+        agentNumber,
+        eventName,
+      } =
+        parseNeoDoveEvent(
+          req.body
+        );
 
 
-      if (!Array.isArray(payload)) {
+      if (!mobile) {
 
         return res
-          .status(400)
+          .status(200)
           .json({
-            success: false,
 
-            message:
-              "Invalid Callyzer webhook payload",
+            success: true,
+
+            status:
+              "ignored_missing_mobile",
           });
       }
 
 
-      const results = [];
+      if (!agentNumber) {
 
-      const processed =
-        new Set();
-
-
-      // ----------------------------------------------
-      // Employees
-      // ----------------------------------------------
-
-      for (
-        const employee
-        of payload
-      ) {
-
-        const employeeName =
-          employee.emp_name;
-
-        const employeeNumber =
-          employee.emp_number;
-
-
-        const callLogs =
-          Array.isArray(
-            employee.call_logs
-          )
-            ? employee.call_logs
-            : [];
-
-
-        // --------------------------------------------
-        // Individual calls
-        // --------------------------------------------
-
-        for (
-          const call
-          of callLogs
-        ) {
-
-          console.log(
-            "======================================"
-          );
-
-          console.log(
-            "CALLYZER CALL EVENT"
-          );
-
-          console.log({
-            employeeName,
-
-            employeeNumber,
-
-            clientName:
-              call.client_name,
-
-            clientNumber:
-              call.client_number,
-
-            callId:
-              call.id,
-
-            callType:
-              call.call_type,
-
-            duration:
-              call.duration,
-
-            recordingUrl:
-              call.call_recording_url ||
-              null,
-          });
-
-          console.log(
-            "======================================"
-          );
-
-
-          // ------------------------------------------
-          // Only outgoing calls
-          // ------------------------------------------
-
-          if (
-            String(
-              call.call_type || ""
-            )
-              .toLowerCase()
-              .trim() !==
-            "outgoing"
-          ) {
-            continue;
-          }
-
-
-          const client =
-            formatIndianPhone(
-              call.client_number
-            );
-
-
-          const employeePhone =
-            formatIndianPhone(
-              employeeNumber
-            );
-
-
-          if (
-            !client ||
-            !employeePhone
-          ) {
-
-            console.log(
-              "Skipping invalid/test number"
-            );
-
-            continue;
-          }
-
-
-          // Avoid same lead more than once
-          // in same webhook payload
-
-          const key =
-            `${employeePhone}:${client}`;
-
-
-          if (
-            processed.has(key)
-          ) {
-            continue;
-          }
-
-
-          processed.add(key);
-
-
-          const leadResult =
-            await createCallyzerLead(
-              call.client_number,
-
-              employeeNumber,
-
-              call.client_name
-            );
-
-
-          results.push({
-            clientNumber:
-              client,
-
-            employeeName,
-
-            employeeNumber:
-              employeePhone,
-
-            callId:
-              call.id,
-
-            duration:
-              call.duration,
-
-            callType:
-              call.call_type,
-
-            recordingUrl:
-              call.call_recording_url ||
-              null,
-
-            lead:
-              leadResult,
-          });
-        }
-      }
-
-
-      return res
-        .status(200)
-        .json({
-          success: true,
-
-          message:
-            "Callyzer call webhook processed",
-
-          leads_processed:
-            results.length,
-
-          results,
-        });
-
-    } catch (error) {
-
-      console.error(
-        "❌ Callyzer webhook error:",
-        error
-      );
-
-
-      return res
-        .status(500)
-        .json({
-          success: false,
-
-          message:
-            "Callyzer webhook processing failed",
-
-          error:
-            error.message,
-        });
-    }
-  }
-);
-app.get("/upload", (req, res) => {
-  res.send(`
-<!DOCTYPE html>
-<html>
-<head>
-  <title>NeoDove Lead Import</title>
-
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #f5f6f8;
-      padding: 40px;
-    }
-
-    .box {
-      max-width: 500px;
-      margin: auto;
-      background: white;
-      padding: 30px;
-      border-radius: 12px;
-      box-shadow: 0 5px 20px rgba(0,0,0,.08);
-    }
-
-    h2 {
-      margin-top: 0;
-    }
-
-    input {
-      display: block;
-      width: 100%;
-      margin: 15px 0;
-      padding: 10px;
-      box-sizing: border-box;
-    }
-
-    button {
-      width: 100%;
-      padding: 12px;
-      background: #111;
-      color: white;
-      border: 0;
-      border-radius: 6px;
-      cursor: pointer;
-    }
-
-    .note {
-      font-size: 13px;
-      color: #666;
-      margin-top: 15px;
-    }
-  </style>
-</head>
-
-<body>
-
-<div class="box">
-
-  <h2>Upload Leads</h2>
-
-  <form
-    action="/upload-leads"
-    method="POST"
-    enctype="multipart/form-data"
-  >
-
-    <label>Excel File</label>
-
-    <input
-      type="file"
-      name="excel"
-      accept=".xlsx"
-      required
-    />
-
-    <label>
-      Maximum rows to test
-    </label>
-
-    <input
-      type="number"
-      name="limit"
-      placeholder="Example: 2"
-      min="1"
-    />
-
-    <button type="submit">
-      Upload to NeoDove
-    </button>
-
-  </form>
-
-  <div class="note">
-    Only Mobile Number is mandatory.
-    Leave Maximum Rows blank later to import
-    the entire Excel file.
-  </div>
-
-</div>
-
-</body>
-</html>
-  `);
-});
-
-app.post(
-  "/upload-leads",
-
-  upload.single("excel"),
-
-  async (req, res) => {
-    try {
-
-      if (!NEODOVE_IMPORT_URL) {
-        return res.status(500).json({
-          success: false,
-          message:
-            "NEODOVE_IMPORT_URL is not configured",
-        });
-      }
-
-
-      if (!req.file) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Please upload an Excel file",
-        });
-      }
-
-
-      const workbook =
-        new ExcelJS.Workbook();
-
-
-      await workbook.xlsx.load(
-        req.file.buffer
-      );
-
-
-      const worksheet =
-        workbook.worksheets[0];
-
-
-      if (!worksheet) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Excel file has no worksheet",
-        });
-      }
-
-
-      // --------------------------------------------
-      // Read headers
-      // --------------------------------------------
-
-      const headerRow =
-        worksheet.getRow(1);
-
-
-      const columns = {};
-
-
-      headerRow.eachCell(
-        { includeEmpty: false },
-
-        (cell, columnNumber) => {
-
-          const originalHeader =
-            getCellValue(cell);
-
-
-          const normalized =
-            normalizeHeader(
-              originalHeader
-            );
-
-
-          const neodoveField =
-            EXCEL_FIELD_MAP[
-              normalized
-            ];
-
-
-          if (neodoveField) {
-            columns[columnNumber] =
-              neodoveField;
-          }
-        }
-      );
-
-
-      // --------------------------------------------
-      // Mobile column must exist
-      // --------------------------------------------
-
-      const hasMobile =
-        Object.values(
-          columns
-        ).includes("mobile");
-
-
-      if (!hasMobile) {
         return res
-          .status(400)
+          .status(200)
           .json({
-            success: false,
 
-            message:
-              "Could not find a mobile/phone number column in the Excel file",
+            success: true,
+
+            status:
+              "ignored_missing_agent",
           });
       }
 
 
-      const limit =
-        req.body.limit
-          ? Number(req.body.limit)
-          : null;
+      const callyzerResult =
+        await queueCallyzerJob(
 
+          () =>
+            upsertCallyzerLead({
 
-      const results = [];
-
-      let sent = 0;
-      let skipped = 0;
-      let failed = 0;
-
-
-      // --------------------------------------------
-      // Process rows
-      // --------------------------------------------
-
-      for (
-        let rowNumber = 2;
-        rowNumber <= worksheet.rowCount;
-        rowNumber++
-      ) {
-
-        if (
-          limit &&
-          sent >= limit
-        ) {
-          break;
-        }
-
-
-        const row =
-          worksheet.getRow(
-            rowNumber
-          );
-
-
-        const lead = {};
-
-
-        // ------------------------------------------
-        // Only use fields that actually exist
-        // ------------------------------------------
-
-        for (
-          const [
-            columnNumber,
-            fieldName,
-          ] of Object.entries(
-            columns
-          )
-        ) {
-
-          const value =
-            getCellValue(
-              row.getCell(
-                Number(
-                  columnNumber
-                )
-              )
-            );
-
-
-          // Blank value = don't send field
-          if (!value) {
-            continue;
-          }
-
-
-          lead[fieldName] =
-            value;
-        }
-
-
-        // ------------------------------------------
-        // Mobile is mandatory
-        // ------------------------------------------
-
-        const mobile =
-          normalizeMobile(
-            lead.mobile
-          );
-
-
-        if (!mobile) {
-
-          skipped++;
-
-          results.push({
-            row: rowNumber,
-            status: "skipped",
-            reason:
-              "Mobile number missing or invalid",
-          });
-
-          continue;
-        }
-
-
-        lead.mobile =
-          mobile;
-
-
-        // Name is optional.
-        // If missing, don't send it.
-        if (
-          lead.name &&
-          !String(
-            lead.name
-          ).trim()
-        ) {
-          delete lead.name;
-        }
-
-
-        try {
-
-          console.log(
-            `Sending Excel row ${rowNumber} to NeoDove`
-          );
-
-          console.log(lead);
-
-
-          const result =
-            await sendLeadToNeoDove(
-              lead
-            );
-
-
-          if (result.success) {
-
-            sent++;
-
-            results.push({
-              row: rowNumber,
-              mobile,
               name:
-                lead.name || "",
-              status: "sent",
-            });
+                leadName,
 
-          } else {
-
-            failed++;
-
-            results.push({
-              row: rowNumber,
               mobile,
-              status: "failed",
-              response:
-                result.data,
-            });
-          }
 
-
-          /*
-            Important:
-
-            We intentionally send leads slowly.
-
-            NeoDove creates the lead
-            → assigns employee
-            → sends webhook
-            → Render calls Callyzer.
-
-            Callyzer Sandbox has a rate limit,
-            so do not blast all rows at once.
-          */
-
-          await sleep(1500);
-
-        } catch (error) {
-
-          failed++;
-
-          results.push({
-            row: rowNumber,
-            mobile,
-            status: "failed",
-            error:
-              error.message,
-          });
-        }
-      }
+              agentNumber,
+            })
+        );
 
 
       return res.json({
+
         success: true,
 
         message:
-          "Excel processing completed",
+          "NeoDove lead processed",
 
-        file:
-          req.file.originalname,
+        event:
+          eventName,
 
-        worksheet:
-          worksheet.name,
+        lead: {
 
-        sent,
+          name:
+            leadName,
 
-        skipped,
+          mobile,
 
-        failed,
+          agent_name:
+            agentName,
 
-        results,
+          agent_number:
+            agentNumber,
+        },
+
+        callyzer:
+          callyzerResult,
       });
 
 
     } catch (error) {
 
       console.error(
-        "Excel upload error:",
+        "Old NeoDove route error:",
         error
       );
 
@@ -1375,10 +961,11 @@ app.post(
       return res
         .status(500)
         .json({
+
           success: false,
 
           message:
-            "Excel import failed",
+            "NeoDove lead processing failed",
 
           error:
             error.message,
@@ -1387,16 +974,21 @@ app.post(
   }
 );
 
+
 // ======================================================
 // 404
-// IMPORTANT: KEEP THIS LAST
+//
+// MUST ALWAYS BE LAST ROUTE
 // ======================================================
 
 app.use((req, res) => {
+
   res
     .status(404)
     .json({
+
       success: false,
+
       message:
         "Route not found",
     });
@@ -1404,7 +996,7 @@ app.use((req, res) => {
 
 
 // ======================================================
-// SERVER
+// START SERVER
 // ======================================================
 
 app.listen(
@@ -1433,6 +1025,14 @@ app.listen(
           ? "SANDBOX"
           : "PRODUCTION"
       }`
+    );
+
+    console.log(
+      "Main NeoDove endpoint:"
+    );
+
+    console.log(
+      "/neodove/call-sync"
     );
 
     console.log(
