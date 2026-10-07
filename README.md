@@ -286,14 +286,14 @@ Example structure:
     {
       "first_name": "Zahid",
       "contact_numbers": [
-        "91-8509074960"
+        "91-10000000"
       ]
     }
   ],
   "assignment": {
     "strategy": "Assign to All Selected",
     "emp_numbers": [
-      "91-9933407752"
+      "91-0000000000"
     ]
   },
   "existing_lead": {
